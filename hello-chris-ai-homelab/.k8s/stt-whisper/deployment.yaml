@@ -23,9 +23,14 @@ spec:
         - name: server
           image: rhasspy/wyoming-whisper:latest
           imagePullPolicy: IfNotPresent
+          env:
+            - name: HF_HOME
+              value: /data/hf
+            - name: XDG_CACHE_HOME
+              value: /data
           args:
             - "--model"
-            - "small-int8"
+            - "base-int8"
             - "--language"
             - "en"
             - "--download-dir"

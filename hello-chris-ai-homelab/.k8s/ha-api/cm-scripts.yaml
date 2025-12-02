@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ha-api-scripts
+  namespace: home-assistant
+data:
+  configure.py: |
+    import os, sys, time, json
+    import urllib.request
+    import urllib.error
+    import ssl
+    import websocket
+
+    HA_BASE = os.environ['HA_BASE']
+    HA_TOKEN = os.environ['HA_TOKEN']
+    STT_HOST = os.environ['STT_HOST']
+    STT_PORT = int(os.environ['STT_PORT'])
+    TTS_ENTITY_ID = os.environ['TTS_ENTITY_ID']
+
+    opener = urllib.request.build_opener()
+    opener.addheaders = [('Authorization', f'Bearer {HA_TOKEN}'), ('Content-Type','application/json')]
+
+    def rest(method, path, payload=None):
+      url = HA_BASE + path
+      data = None if payload is None else json.dumps(payload).encode()
+      req = urllib.request.Request(url, data=data, method=method)
+      try:
+        with opener.open(req, timeout=30) as r:
+          if r.headers.get('Content-Type','').startswith('application/json'):
+            return json.loads(r.read().decode())
+          return r.read().decode()
+      except urllib.error.HTTPError as e:
+        sys.stderr.write(f'HTTP {e.code} for {path}: {e.read().decode()}\n')
+        raise
+
+    def ensure_wyoming():
+      # Try to start config flow for wyoming (or whisper) and provide host/port
+      for handler in ('wyoming','whisper'):
+        try:
+          init = rest('POST','/api/config/config_entries/flow', { 'handler': handler, 'show_advanced_options': True })
+        except Exception as e:
+          continue
+        flow_id = init['flow_id']
+        step = rest('POST', f"/api/config/config_entries/flow/{flow_id}", { 'host': STT_HOST, 'port': STT_PORT })
+        if step.get('type') == 'create_entry':
+          print(f"[ok] Created config entry for {handler} -> {STT_HOST}:{STT_PORT}")
+          return True
+      print('[warn] Could not create wyoming/whisper config entry via REST; it may already exist')
+      return False
+
+    def ws_call(sock, msg):
+      sock.send(json.dumps(msg))
+      while True:
+        resp = json.loads(sock.recv())
+        if resp.get('id') == msg['id']:
+          return resp
+
+    def ensure_pipeline():
+      ws_url = HA_BASE.replace('http','ws') + '/api/websocket'
+      ws = websocket.create_connection(ws_url, timeout=30)
+      hello = json.loads(ws.recv())
+      ws.send(json.dumps({ 'type':'auth', 'access_token': HA_TOKEN }))
+      auth = json.loads(ws.recv())
+      if auth.get('type') != 'auth_ok':
+        raise SystemExit('WS auth failed')
+      # list STT and TTS entities
+      eid = 1
+      ents = ws_call(ws, { 'id': eid, 'type':'config/entity_registry/list' }); eid += 1
+      stt_entities = [e['entity_id'] for e in ents.get('result',[]) if e['entity_id'].startswith('stt.')]
+      tts_entities = [e['entity_id'] for e in ents.get('result',[]) if e['entity_id'].startswith('tts.')]
+      stt_entity = None
+      for e in stt_entities:
+        if 'whisper' in e or 'wyoming' in e:
+          stt_entity = e
+          break
+      if not stt_entity:
+        print('[warn] No STT entity found yet; pipeline creation may fail')
+      tts_entity = TTS_ENTITY_ID if TTS_ENTITY_ID in tts_entities else (tts_entities[0] if tts_entities else None)
+
+      # list pipelines
+      pipes = ws_call(ws, { 'id': eid, 'type':'assist_pipeline/pipeline/list' }); eid += 1
+      existing = pipes.get('result', []) or []
+      name = 'Default (Wyoming + Kokoro)'
+      default_id = None
+      for p in existing:
+        if p.get('name') == name:
+          default_id = p.get('id')
+          break
+      if default_id is None:
+        create = ws_call(ws, { 'id': eid, 'type':'assist_pipeline/pipeline/create', 'name': name, 'language': 'en', 'stt_engine': stt_entity, 'tts_engine': tts_entity }); eid += 1
+        default_id = create.get('result',{}).get('id')
+        print(f"[ok] Created pipeline {name} -> {default_id}")
+      # set default
+      if default_id:
+        ws_call(ws, { 'id': eid, 'type':'assist_pipeline/pipeline/set_default', 'pipeline_id': default_id }); eid += 1
+        print('[ok] Set default pipeline')
+      ws.close()
+
+    if __name__ == '__main__':
+      ensure_wyoming()
+      try:
+        ensure_pipeline()
+      except Exception as e:
+        print('[warn] pipeline setup failed:', e)
+        sys.exit(0)
