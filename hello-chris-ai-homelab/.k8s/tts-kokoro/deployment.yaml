@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kokoro-tts
+  namespace: voice
+  labels:
+    app.kubernetes.io/name: kokoro-tts
+    app.kubernetes.io/part-of: voice-assistant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kokoro-tts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kokoro-tts
+    spec:
+      serviceAccountName: voice-sa
+      containers:
+        - name: server
+          image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8880
+          env:
+            - name: DOWNLOAD_MODEL
+              value: "true"
+            - name: DEVICE
+              value: cpu
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kokoro-tts
+  namespace: voice
+  labels:
+    app.kubernetes.io/name: kokoro-tts
+    app.kubernetes.io/part-of: voice-assistant
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kokoro-tts
+  ports:
+    - name: http
+      port: 8880
+      targetPort: http
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: kokoro-tts
+  namespace: voice
+  labels:
+    app.kubernetes.io/name: kokoro-tts
+    app.kubernetes.io/part-of: voice-assistant
+spec:
+  to:
+    kind: Service
+    name: kokoro-tts
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None

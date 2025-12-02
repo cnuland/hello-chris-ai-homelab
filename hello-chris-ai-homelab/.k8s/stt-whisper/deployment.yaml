@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wyoming-whisper
+  namespace: voice
+  labels:
+    app.kubernetes.io/name: wyoming-whisper
+    app.kubernetes.io/part-of: voice-assistant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wyoming-whisper
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wyoming-whisper
+    spec:
+      serviceAccountName: whisper-sa
+      containers:
+        - name: server
+          image: rhasspy/wyoming-whisper:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--model"
+            - "small-int8"
+            - "--language"
+            - "en"
+            - "--download-dir"
+            - "/data"
+            - "--data-dir"
+            - "/data"
+          ports:
+            - name: tcp
+              containerPort: 10300
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: whisper-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wyoming-whisper
+  namespace: voice
+  labels:
+    app.kubernetes.io/name: wyoming-whisper
+    app.kubernetes.io/part-of: voice-assistant
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: wyoming-whisper
+  ports:
+    - name: wyoming
+      port: 10300
+      targetPort: tcp
+      protocol: TCP
