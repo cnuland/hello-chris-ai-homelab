@@ -17,8 +17,8 @@ spec:
       restartPolicy: Never
       containers:
         - name: postinstall
-          image: bitnami/kubectl:1.30
-          command: ["/bin/sh","-lc","/script/postinstall.sh"]
+          image: alpine:3.20
+          command: ["/bin/sh","-lc","apk add --no-cache kubectl >/dev/null && /script/postinstall.sh"]
           volumeMounts:
             - name: script
               mountPath: /script
