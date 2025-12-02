@@ -13,16 +13,14 @@ data:
     CFG=/config/configuration.yaml
     echo "[postinstall] Updating $CFG with OpenAI TTS if missing..."
     if ! grep -q "openai_tts" "$CFG"; then
-      cat >> "$CFG" <<'YAML'
-
-# Added by ha-addons postinstall: Kokoro via OpenAI-compatible TTS
-tts:
-  - platform: openai_tts
-    api_base: "https://kokoro-tts-voice.apps.ironman.cjlabs.dev/v1"
-    api_key: "REPLACE_ME"
-    model: "kokoro"
-    voice: "af_bella"
-YAML
+      printf '\n' >> "$CFG"
+      printf '# Added by ha-addons postinstall: Kokoro via OpenAI-compatible TTS\n' >> "$CFG"
+      printf 'tts:\n' >> "$CFG"
+      printf '  - platform: openai_tts\n' >> "$CFG"
+      printf '    api_base: "https://kokoro-tts-voice.apps.ironman.cjlabs.dev/v1"\n' >> "$CFG"
+      printf '    api_key: "REPLACE_ME"\n' >> "$CFG"
+      printf '    model: "kokoro"\n' >> "$CFG"
+      printf '    voice: "af_bella"\n' >> "$CFG"
       echo "[postinstall] Appended TTS block."
     else
       echo "[postinstall] TTS openai_tts already present, skipping."
