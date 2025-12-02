@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ha-addon-installer
+  namespace: home-assistant
+  labels:
+    app.kubernetes.io/name: ha-addon-installer
+    app.kubernetes.io/part-of: home-assistant
+data:
+  install.sh: |
+    #!/bin/sh
+    set -euo pipefail
+    echo "[installer] Starting add-on installation..."
+    BASE=/config/custom_components
+    mkdir -p "$BASE"
+
+    # Install HACS
+    echo "[installer] Downloading HACS..."
+    mkdir -p /tmp/hacs && cd /tmp/hacs
+    curl -fsSL -o hacs.zip https://github.com/hacs/integration/releases/latest/download/hacs.zip
+    python3 - <<'PY'
+import zipfile, os
+zf=zipfile.ZipFile('hacs.zip')
+for m in zf.namelist():
+    # Extract into custom_components/hacs
+    if m.startswith('hacs/'):
+        zf.extract(m, '/config/custom_components')
+PY
+    echo "[installer] HACS installed under $BASE/hacs"
+
+    # Install OpenAI TTS custom integration
+    echo "[installer] Downloading OpenAI TTS integration..."
+    mkdir -p /tmp/openai_tts && cd /tmp/openai_tts
+    curl -fsSL -o openai_tts.zip https://github.com/sfortis/openai_tts/archive/refs/heads/main.zip
+    python3 - <<'PY'
+import zipfile, os, shutil
+zf=zipfile.ZipFile('openai_tts.zip')
+root=None
+for n in zf.namelist():
+    if n.endswith('/') and n.count('/')==1:
+        root=n
+        break
+if root is None:
+    raise SystemExit('unexpected zip layout')
+# target folder in HA config
+out='/config/custom_components/openai_tts'
+os.makedirs(out, exist_ok=True)
+# copy only custom_components/openai_tts/* from the repo
+prefix=root+'custom_components/openai_tts/'
+for m in zf.namelist():
+    if m.startswith(prefix) and not m.endswith('/'):
+        rel=m[len(prefix):]
+        dest=os.path.join(out, rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with zf.open(m) as src, open(dest,'wb') as dst:
+            dst.write(src.read())
+PY
+    echo "[installer] OpenAI TTS installed under $BASE/openai_tts"
+
+    # permissions - make readable
+    chmod -R a+rX /config/custom_components
+    echo "[installer] Completed."

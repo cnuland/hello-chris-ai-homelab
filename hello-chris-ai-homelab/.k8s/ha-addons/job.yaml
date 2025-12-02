@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ha-addon-installer
+  namespace: home-assistant
+  labels:
+    app.kubernetes.io/name: ha-addon-installer
+    app.kubernetes.io/part-of: home-assistant
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ha-addon-installer
+    spec:
+      serviceAccountName: home-assistant
+      restartPolicy: Never
+      containers:
+        - name: installer
+          image: python:3.11-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh","-lc","chmod +x /script/install.sh && /script/install.sh"]
+          volumeMounts:
+            - name: script
+              mountPath: /script
+            - name: config
+              mountPath: /config
+          env:
+            - name: PIP_DISABLE_PIP_VERSION_CHECK
+              value: "1"
+      volumes:
+        - name: script
+          configMap:
+            name: ha-addon-installer
+            defaultMode: 0755
+        - name: config
+          persistentVolumeClaim:
+            claimName: home-assistant-config
