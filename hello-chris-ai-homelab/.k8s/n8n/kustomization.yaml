@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: n8n
+generatorOptions:
+  disableNameSuffixHash: true
+resources:
+  - namespace.yaml
+  - resources/configmap__kube-root-ca.crt.json
+  - resources/configmap__openshift-service-ca.crt.json
+  - resources/deployment.apps__n8n.json
+  - resources/persistentvolumeclaim__n8n-data.json
+  - resources/rolebinding.rbac.authorization.k8s.io__admin.json
+  - resources/rolebinding.rbac.authorization.k8s.io__system:deployers.json
+  - resources/rolebinding.rbac.authorization.k8s.io__system:image-builders.json
+  - resources/rolebinding.rbac.authorization.k8s.io__system:image-pullers.json
+  - resources/rolebinding.rbac.authorization.k8s.io__system:openshift:scc:anyuid.json
+  - resources/route.route.openshift.io__n8n.json
+  - resources/service__n8n.json
+  - resources/serviceaccount__builder.json
+  - resources/serviceaccount__default.json
+  - resources/serviceaccount__deployer.json
+  - resources/serviceaccount__n8n-sa.json
+secretGenerator:
+- name: n8n-secrets
+  type: Opaque
+  files:
+    - secrets/n8n-secrets/N8N_BASIC_AUTH_PASSWORD
+    - secrets/n8n-secrets/N8N_BASIC_AUTH_USER
+    - secrets/n8n-secrets/N8N_ENCRYPTION_KEY
