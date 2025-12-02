@@ -1,0 +1,29 @@
+apiVersion: v1
+data:
+  service-ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIDUTCCAjmgAwIBAgIIc1PxtO8u71YwDQYJKoZIhvcNAQELBQAwNjE0MDIGA1UE
+    Awwrb3BlbnNoaWZ0LXNlcnZpY2Utc2VydmluZy1zaWduZXJAMTc2MjAxNDE3ODAe
+    Fw0yNTExMDExNjIyNTdaFw0yNzEyMzExNjIyNThaMDYxNDAyBgNVBAMMK29wZW5z
+    aGlmdC1zZXJ2aWNlLXNlcnZpbmctc2lnbmVyQDE3NjIwMTQxNzgwggEiMA0GCSqG
+    SIb3DQEBAQUAA4IBDwAwggEKAoIBAQCsP5G4WH7xpIqtMASkfV8J+Sl2CdUu1si0
+    0FTnl+VhbYZ8SfZNYt5fFENQKOpd9ch7uUomPj5VeY7Y6eauwebJcRYXOgdsVj+n
+    3p2MIZG02ZxcBRdyN0WYIwcaaw+/w81GQOz5srubOCoEgACIZ4IxhgdiLEDf2UJy
+    oPJ9cWQEb1w1w0ORjQqjkXmRFc1Ci7cotIYKYEfrs2E1BHVxsqDSe7gBhh2yZTeC
+    ypX8F7B6XxVQcwaWaD9b9IxAzGDvp9ymlttXOJV/eg9cO56Z/5T9+9qvcV2OZQhQ
+    31eQjDrGcfkx56KMg02qbGDOrbv4ZFQIVvad+8WARby+W5u82KrDAgMBAAGjYzBh
+    MA4GA1UdDwEB/wQEAwICpDAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBTCLNFv
+    S9cPitF+4uB7Obnw4MeYrzAfBgNVHSMEGDAWgBTCLNFvS9cPitF+4uB7Obnw4MeY
+    rzANBgkqhkiG9w0BAQsFAAOCAQEALOeD2oDupLNfzbpgW8abuksYuhnKv0XywroI
+    7tFkB/xcPfeXGP9PJ0m2xpBfUQ+vwlyhbnU1XxlE4YSrdwQJHc9wNnu4tGcs9qbI
+    +e9KzYGzzVGEXfMUilW5Gr2DXW8yaIjEGAn/nxz+MmKQmDy1p/uHdfutE4Lx6nEB
+    yuD/bvWPQpxR5Tb7gpMGmSskrcGp/DSW3I8WWvs8FA3cRgxzbneUDiys2iM1Q3Ny
+    5nAaSImWmpjh7inW56FDPE6qRJ/eBqJK6dfNxhr/ieS42x9LVO2rowdgod6LLQHP
+    14iB+V2UDWWz7u/s1F3QBkG1QC22gtsGvMgx18UjpY0c7zw08g==
+    -----END CERTIFICATE-----
+kind: ConfigMap
+metadata:
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+  name: openshift-service-ca.crt
+  namespace: n8n

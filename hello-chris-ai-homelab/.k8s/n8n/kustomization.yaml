@@ -5,21 +5,22 @@ generatorOptions:
   disableNameSuffixHash: true
 resources:
   - namespace.yaml
-  - resources/configmap__kube-root-ca.crt.json
-  - resources/configmap__openshift-service-ca.crt.json
-  - resources/deployment.apps__n8n.json
-  - resources/persistentvolumeclaim__n8n-data.json
-  - resources/rolebinding.rbac.authorization.k8s.io__admin.json
-  - resources/rolebinding.rbac.authorization.k8s.io__system:deployers.json
-  - resources/rolebinding.rbac.authorization.k8s.io__system:image-builders.json
-  - resources/rolebinding.rbac.authorization.k8s.io__system:image-pullers.json
-  - resources/rolebinding.rbac.authorization.k8s.io__system:openshift:scc:anyuid.json
-  - resources/route.route.openshift.io__n8n.json
-  - resources/service__n8n.json
-  - resources/serviceaccount__builder.json
-  - resources/serviceaccount__default.json
-  - resources/serviceaccount__deployer.json
-  - resources/serviceaccount__n8n-sa.json
+  - resources/configmap__kube-root-ca.crt.yaml
+  - resources/configmap__openshift-service-ca.crt.yaml
+  - resources/deployment.apps__n8n.yaml
+  - resources/persistentvolumeclaim__n8n-data.yaml
+  - resources/rolebinding.rbac.authorization.k8s.io__admin.yaml
+  - resources/rolebinding.rbac.authorization.k8s.io__system:deployers.yaml
+  - resources/rolebinding.rbac.authorization.k8s.io__system:image-builders.yaml
+  - resources/rolebinding.rbac.authorization.k8s.io__system:image-pullers.yaml
+  - resources/rolebinding.rbac.authorization.k8s.io__system:openshift:scc:anyuid.yaml
+  - resources/route.route.openshift.io__n8n.yaml
+  - resources/service__n8n.yaml
+  - resources/serviceaccount__builder.yaml
+  - resources/serviceaccount__default.yaml
+  - resources/serviceaccount__deployer.yaml
+  - resources/serviceaccount__n8n-sa.yaml
+
 secretGenerator:
 - name: n8n-secrets
   type: Opaque

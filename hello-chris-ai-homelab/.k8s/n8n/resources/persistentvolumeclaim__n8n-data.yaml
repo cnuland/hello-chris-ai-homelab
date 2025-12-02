@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    pv.kubernetes.io/bind-completed: "yes"
+    pv.kubernetes.io/bound-by-controller: "yes"
+    volume.beta.kubernetes.io/storage-provisioner: nfs-storage
+    volume.kubernetes.io/storage-provisioner: nfs-storage
+  finalizers:
+  - kubernetes.io/pvc-protection
+  name: n8n-data
+  namespace: n8n
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: nfs-storage
+  volumeMode: Filesystem
+  volumeName: pvc-0b867fc4-b4fa-4f5c-b4b3-417f06d32496
