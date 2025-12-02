@@ -4,3 +4,6 @@ namespace: home-assistant
 resources:
   - cm-installer.yaml
   - job.yaml
+  - rbac.yaml
+  - cm-postinstall.yaml
+  - job-postinstall.yaml

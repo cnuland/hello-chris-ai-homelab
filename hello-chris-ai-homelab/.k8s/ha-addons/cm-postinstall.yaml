@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ha-postinstall
+  namespace: home-assistant
+  labels:
+    app.kubernetes.io/name: ha-postinstall
+    app.kubernetes.io/part-of: home-assistant
+data:
+  postinstall.sh: |
+    #!/bin/sh
+    set -euo pipefail
+    CFG=/config/configuration.yaml
+    echo "[postinstall] Updating $CFG with OpenAI TTS if missing..."
+    if ! grep -q "openai_tts" "$CFG"; then
+      cat >> "$CFG" <<'YAML'
+
+# Added by ha-addons postinstall: Kokoro via OpenAI-compatible TTS
+tts:
+  - platform: openai_tts
+    api_base: "https://kokoro-tts-voice.apps.ironman.cjlabs.dev/v1"
+    api_key: "REPLACE_ME"
+    model: "kokoro"
+    voice: "af_bella"
+YAML
+      echo "[postinstall] Appended TTS block."
+    else
+      echo "[postinstall] TTS openai_tts already present, skipping."
+    fi
+    echo "[postinstall] Restarting Home Assistant by deleting pod..."
+    kubectl -n home-assistant delete pod -l app.kubernetes.io/name=home-assistant --ignore-not-found --wait=true
+    echo "[postinstall] Done."

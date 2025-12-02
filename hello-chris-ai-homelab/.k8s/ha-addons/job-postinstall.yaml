@@ -1,0 +1,34 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ha-postinstall
+  namespace: home-assistant
+  labels:
+    app.kubernetes.io/name: ha-postinstall
+    app.kubernetes.io/part-of: home-assistant
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ha-postinstall
+    spec:
+      serviceAccountName: ha-admin
+      restartPolicy: Never
+      containers:
+        - name: postinstall
+          image: bitnami/kubectl:1.30
+          command: ["/bin/sh","-lc","/script/postinstall.sh"]
+          volumeMounts:
+            - name: script
+              mountPath: /script
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: script
+          configMap:
+            name: ha-postinstall
+            defaultMode: 0755
+        - name: config
+          persistentVolumeClaim:
+            claimName: home-assistant-config
