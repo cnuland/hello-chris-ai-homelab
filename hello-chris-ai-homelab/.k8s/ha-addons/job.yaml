@@ -19,7 +19,7 @@ spec:
         - name: installer
           image: python:3.11-alpine
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh","-lc","chmod +x /script/install.sh && /script/install.sh"]
+          command: ["/bin/sh","-lc","/script/install.sh"]
           volumeMounts:
             - name: script
               mountPath: /script
