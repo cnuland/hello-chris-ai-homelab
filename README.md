@@ -60,3 +60,35 @@ Adjustments for new clusters:
 - Update Route hosts to the new router domain if needed.
 - Set a `storageClassName` in the PVC JSON if your cluster lacks a default.
 - For reproducibility, pin the container images to a digest instead of tags like `latest`.
+
+## Automated voice configuration (Wyoming + Kokoro)
+
+Prereqs: Home Assistant is running, HACS + OpenAI TTS are installed by the ha-addons Job.
+
+1) Create a long-lived access token in Home Assistant (Profile > Long-Lived Access Tokens).
+
+2) Create/patch the Secret with your token and base URL (use your HA Route host):
+```bash
+oc -n home-assistant create secret generic ha-api-credentials \
+  --from-literal=HA_BASE="https://$(oc -n home-assistant get route home-assistant -o jsonpath='{.spec.host}')" \
+  --from-literal=HA_TOKEN={{HA_LONG_LIVED_TOKEN}} \
+  --from-literal=STT_HOST=wyoming-whisper.voice.svc.cluster.local \
+  --from-literal=STT_PORT=10300 \
+  --from-literal=TTS_ENTITY_ID=tts.openai_tts \
+  --dry-run=client -o yaml | oc apply -f -
+```
+
+3) Run the automation Job to add the Wyoming integration and create the default Assist pipeline:
+```bash
+oc apply -k hello-chris-ai-homelab/.k8s/ha-api
+oc -n home-assistant logs -f job/ha-configure-voice
+```
+
+Troubleshooting
+- If the Job logs show HTTP 401 or "WS auth failed", the token is invalid/expired or pasted incorrectly. Recreate the Secret with a fresh token and rerun step 3.
+- You can quickly validate the token:
+```bash
+HA_BASE=https://$(oc -n home-assistant get route home-assistant -o jsonpath='{.spec.host}')
+curl -s -H "Authorization: Bearer {{HA_LONG_LIVED_TOKEN}}" "$HA_BASE/api/" | jq .
+```
+Expected a small JSON dict (no 401).
