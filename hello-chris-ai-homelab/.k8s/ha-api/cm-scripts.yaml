@@ -48,12 +48,145 @@ data:
       print('[warn] Could not create wyoming/whisper config entry via REST; it may already exist')
       return False
 
-    def ws_call(sock, msg):
+    def ws_call(sock, msg, timeout=30):
       sock.send(json.dumps(msg))
+      sock.settimeout(timeout)
       while True:
-        resp = json.loads(sock.recv())
-        if resp.get('id') == msg['id']:
-          return resp
+        raw = sock.recv()
+        try:
+          resp = json.loads(raw)
+        except Exception:
+          # Ignore non-JSON frames
+          continue
+        if not isinstance(resp, dict):
+          # Ignore JSON that isn't an object (e.g., a JSON string)
+          continue
+        # Some frames (events, etc.) do not carry an id; skip until our id matches
+        if resp.get('id') != msg.get('id'):
+          continue
+        # Surface HA error payloads
+        if resp.get('type') == 'result' and resp.get('success') is False:
+          raise RuntimeError(f"WS call failed: {resp.get('error')}")
+        return resp
+
+    def ws_result(sock, msg):
+      resp = ws_call(sock, msg)
+      if isinstance(resp, dict) and resp.get('type') == 'result':
+        return resp.get('result')
+      return resp
+
+    def ensure_openai_tts():
+      # Attempt to create OpenAI TTS entry that points to Kokoro if custom component is present
+      base = os.environ.get('KOKORO_URL','').rstrip('/')
+      model = os.environ.get('KOKORO_MODEL','kokoro')
+      voice = os.environ.get('KOKORO_VOICE','af_bella')
+      speed = float(os.environ.get('KOKORO_SPEED','1.0') or '1.0')
+      instr = os.environ.get('KOKORO_INSTRUCTIONS','')
+      if not base:
+        return False
+      try:
+        init = rest('POST','/api/config/config_entries/flow', { 'handler': 'openai_tts', 'show_advanced_options': True })
+      except Exception as e:
+        # Likely custom component not loaded yet; skip silently
+        return False
+      fid = init.get('flow_id')
+      if not fid:
+        return False
+      try:
+        data = { 'api_key': 'unused', 'url': f"{base}/audio/speech", 'model': model, 'voice': voice, 'speed': speed }
+        step = rest('POST', f"/api/config/config_entries/flow/{fid}", data)
+        if step.get('type') == 'create_entry':
+          # Optionally set instructions via options flow
+          entry_id = step.get('result',{}).get('entry_id')
+          if entry_id:
+            try:
+              opt_init = rest('POST','/api/config/config_entries/options/flow', { 'handler': entry_id })
+              ofid = opt_init.get('flow_id')
+              if ofid is not None:
+                rest('POST', f"/api/config/config_entries/options/flow/{ofid}", { 'voice': voice, 'instructions': instr })
+            except Exception:
+              pass
+          print('[ok] Created OpenAI TTS entry for Kokoro')
+          return True
+      except Exception as e:
+        print('[warn] OpenAI TTS flow failed:', e)
+      return False
+
+    def ensure_openai_conversation():
+      # Create OpenAI Conversation provider (ChatGPT integration) so pipelines can use it
+      created = False
+      try:
+        init = rest('POST','/api/config/config_entries/flow', { 'handler': 'openai_conversation', 'show_advanced_options': True })
+        fid = init.get('flow_id')
+        if fid:
+          step = rest('POST', f"/api/config/config_entries/flow/{fid}", { 'api_key': 'unused' })
+          if step.get('type') == 'create_entry':
+            print('[ok] Created OpenAI Conversation entry')
+            created = True
+      except Exception:
+        # Integration may already exist
+        pass
+      # Reconfigure to point to local Ollama via WS, and rename title
+      try:
+        ws_url = HA_BASE.replace('http','ws') + '/api/websocket'
+        ws = websocket.create_connection(ws_url, timeout=30)
+        _hello = json.loads(ws.recv())
+        ws.send(json.dumps({ 'type':'auth', 'access_token': HA_TOKEN }))
+        _auth = json.loads(ws.recv())
+        eid = 5000
+        # list entries
+        ws.send(json.dumps({ 'id': eid, 'type': 'config_entries/entry/list' })); eid += 1
+        entries = json.loads(ws.recv()).get('result', [])
+        ollama_url = os.environ.get('OLLAMA_URL','')
+        ollama_model = os.environ.get('OLLAMA_MODEL','')
+        updated_any = False
+        for e in entries:
+          if e.get('domain') == 'openai_conversation':
+            entry_id = e.get('entry_id')
+            data = e.get('data',{}) or {}
+            # apply overrides
+            if ollama_url:
+              data['base_url'] = ollama_url
+            if ollama_model:
+              data['model'] = ollama_model
+            title = 'Ollama Conversation'
+            # send update
+            ws.send(json.dumps({ 'id': eid, 'type': 'config_entries/entry/update', 'entry_id': entry_id, 'title': title, 'data': data })); eid += 1
+            _ = json.loads(ws.recv())
+            updated_any = True
+        if updated_any:
+          print('[ok] Reconfigured OpenAI Conversation to Ollama and renamed to "Ollama Conversation"')
+        ws.close()
+      except Exception as e:
+        print('[warn] Could not reconfigure OpenAI Conversation via WS:', e)
+
+      # Also try REST options flow to set base/model explicitly
+      try:
+        # Get entries to find the id again (REST this time)
+        entries = rest('GET','/api/config/config_entries/entry')
+        oc = [e for e in entries if e.get('domain')=='openai_conversation']
+        if oc:
+          entry_id = oc[0].get('entry_id')
+          init = rest('POST','/api/config/config_entries/options/flow', { 'handler': entry_id })
+          names = [f.get('name') for f in init.get('data_schema',[])] if isinstance(init, dict) else []
+          payload = {}
+          if 'api_key' in names:
+            payload['api_key'] = 'unused'
+          key = None
+          for k in ('base_url','api_base','base','api_endpoint'):
+            if k in names:
+              key = k; break
+          if key:
+            payload[key] = ollama_url
+          if 'model' in names and ollama_model:
+            payload['model'] = ollama_model
+          if payload:
+            _ = rest('POST', f"/api/config/config_entries/options/flow/{init.get('flow_id')}", payload)
+            print('[ok] Set OpenAI Conversation options via REST')
+      except Exception as e:
+        print('[warn] Could not set OpenAI Conversation options via REST:', e)
+
+      return created
 
     def ensure_pipeline():
       ws_url = HA_BASE.replace('http','ws') + '/api/websocket'
@@ -61,43 +194,132 @@ data:
       hello = json.loads(ws.recv())
       ws.send(json.dumps({ 'type':'auth', 'access_token': HA_TOKEN }))
       auth = json.loads(ws.recv())
-      if auth.get('type') != 'auth_ok':
+      if not isinstance(auth, dict) or auth.get('type') != 'auth_ok':
         raise SystemExit('WS auth failed')
-      # list STT and TTS entities
+      # list conversation, STT and TTS entities
       eid = 1
-      ents = ws_call(ws, { 'id': eid, 'type':'config/entity_registry/list' }); eid += 1
-      stt_entities = [e['entity_id'] for e in ents.get('result',[]) if e['entity_id'].startswith('stt.')]
-      tts_entities = [e['entity_id'] for e in ents.get('result',[]) if e['entity_id'].startswith('tts.')]
+      ents = ws_result(ws, { 'id': eid, 'type':'config/entity_registry/list' }); eid += 1
+      if not isinstance(ents, list):
+        ents = []
+      conv_entities = [e['entity_id'] for e in ents if isinstance(e, dict) and e.get('entity_id','').startswith('conversation.')]
+      stt_entities = [e['entity_id'] for e in ents if isinstance(e, dict) and e.get('entity_id','').startswith('stt.')]
+      tts_entities = [e['entity_id'] for e in ents if isinstance(e, dict) and e.get('entity_id','').startswith('tts.')]
+      conversation_entity = None
+      for e in conv_entities:
+        if 'openai' in e or 'ollama' in e:
+          conversation_entity = e
+          break
+      if not conversation_entity and conv_entities:
+        conversation_entity = conv_entities[0]
       stt_entity = None
       for e in stt_entities:
         if 'whisper' in e or 'wyoming' in e:
           stt_entity = e
           break
+      if not stt_entity and stt_entities:
+        stt_entity = stt_entities[0]
       if not stt_entity:
         print('[warn] No STT entity found yet; pipeline creation may fail')
       tts_entity = TTS_ENTITY_ID if TTS_ENTITY_ID in tts_entities else (tts_entities[0] if tts_entities else None)
+      # language defaults
+      lang = 'en'
+      voice = os.environ.get('KOKORO_VOICE','bf_emma')
 
       # list pipelines
-      pipes = ws_call(ws, { 'id': eid, 'type':'assist_pipeline/pipeline/list' }); eid += 1
-      existing = pipes.get('result', []) or []
+      pipes = ws_result(ws, { 'id': eid, 'type':'assist_pipeline/pipeline/list' }); eid += 1
+      existing = pipes or []
+      if isinstance(existing, dict) and 'pipelines' in existing:
+        existing = existing.get('pipelines') or []
       name = 'Default (Wyoming + Kokoro)'
       default_id = None
-      for p in existing:
-        if p.get('name') == name:
+      for p in existing if isinstance(existing, list) else []:
+        if isinstance(p, dict) and p.get('name') == name:
           default_id = p.get('id')
           break
       if default_id is None:
-        create = ws_call(ws, { 'id': eid, 'type':'assist_pipeline/pipeline/create', 'name': name, 'language': 'en', 'stt_engine': stt_entity, 'tts_engine': tts_entity }); eid += 1
-        default_id = create.get('result',{}).get('id')
-        print(f"[ok] Created pipeline {name} -> {default_id}")
-      # set default
+        try:
+          create = ws_result(ws, { 'id': eid, 'type':'assist_pipeline/pipeline/create', 'name': name, 'language': 'en', 'stt_engine': stt_entity, 'tts_engine': tts_entity }); eid += 1
+          if isinstance(create, dict):
+            default_id = create.get('id') or create.get('pipeline_id')
+          if default_id:
+            print(f"[ok] Created pipeline {name} -> {default_id}")
+        except Exception as e:
+          print(f"[warn] pipeline create failed: {e}")
+          # Ensure next id increases even if the create call failed before eid was incremented
+          eid += 1
+          # Fallback: choose an existing pipeline (prefer one with Wyoming/Whisper STT) and set it as default
+          pipes2 = ws_result(ws, { 'id': eid, 'type':'assist_pipeline/pipeline/list' }); eid += 1
+          existing2 = pipes2 or []
+          if isinstance(existing2, dict) and 'pipelines' in existing2:
+            existing2 = existing2.get('pipelines') or []
+          chosen = None
+          for p in existing2 if isinstance(existing2, list) else []:
+            if isinstance(p, dict) and isinstance(p.get('stt_engine'), str) and ('wyoming' in p.get('stt_engine') or 'whisper' in p.get('stt_engine')):
+              chosen = p
+              break
+          if not chosen and isinstance(existing2, list) and existing2:
+            chosen = existing2[0]
+          if chosen:
+            default_id = chosen.get('id')
+            print(f"[ok] Selected existing pipeline -> {default_id}")
+      # ensure required fields and set default
       if default_id:
-        ws_call(ws, { 'id': eid, 'type':'assist_pipeline/pipeline/set_default', 'pipeline_id': default_id }); eid += 1
-        print('[ok] Set default pipeline')
+        try:
+          # Ensure wake-word keys are present (explicit null) to satisfy schema
+          update_payload = {
+            'id': eid,
+            'type': 'assist_pipeline/pipeline/update',
+            'pipeline_id': default_id,
+            'name': name,
+            'language': lang,
+            'conversation_engine': conversation_entity,
+            'conversation_language': lang,
+            'stt_engine': stt_entity,
+            'stt_language': lang,
+            'tts_engine': tts_entity,
+            'tts_language': lang,
+            'tts_voice': voice,
+            'wake_word_entity': None,
+            'wake_word_id': None,
+          }
+          ws_result(ws, update_payload); eid += 1
+          print('[ok] Updated pipeline languages and engines')
+        except Exception as e:
+          print('[warn] pipeline update failed:', e)
+          eid += 1
+        set_cmds = [
+          'assist_pipeline/pipeline/set_default',
+          'assist_pipeline/set_default_pipeline',
+          'assist_pipeline/pipeline/set_preferred',
+        ]
+        set_ok = False
+        for t in set_cmds:
+          try:
+            ws_result(ws, { 'id': eid, 'type': t, 'pipeline_id': default_id }); eid += 1
+            print(f"[ok] Set default pipeline via {t}")
+            set_ok = True
+            break
+          except Exception as e:
+            # Try the next command name if this one is not supported
+            if "Unknown command" in str(e) or "unknown_command" in str(e):
+              continue
+            # Re-raise non-compat errors
+            raise
+        if not set_ok:
+          print('[warn] Could not set default via WS (no compatible command). Please set it once in the UI (Settings → Voice assistants → Pipelines).')
       ws.close()
 
     if __name__ == '__main__':
       ensure_wyoming()
+      # Try to set up Kokoro/OpenAI TTS via config entries
+      try:
+        ensure_openai_tts()
+      except Exception as e:
+        print('[warn] openai_tts setup failed:', e)
+      try:
+        ensure_openai_conversation()
+      except Exception as e:
+        print('[warn] openai_conversation setup failed:', e)
       try:
         ensure_pipeline()
       except Exception as e:

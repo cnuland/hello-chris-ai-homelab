@@ -19,6 +19,9 @@ spec:
         - name: postinstall
           image: quay.io/openshift/origin-cli:latest
           command: ["/bin/sh","-lc","/script/postinstall.sh"]
+          envFrom:
+            - secretRef:
+                name: ha-api-credentials
           volumeMounts:
             - name: script
               mountPath: /script

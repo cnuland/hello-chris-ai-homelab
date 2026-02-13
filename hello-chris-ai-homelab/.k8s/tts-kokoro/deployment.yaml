@@ -17,6 +17,9 @@ spec:
         app.kubernetes.io/name: kokoro-tts
     spec:
       serviceAccountName: voice-sa
+      volumes:
+        - name: cache
+          emptyDir: {}
       containers:
         - name: server
           image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.4
@@ -24,18 +27,44 @@ spec:
           ports:
             - name: http
               containerPort: 8880
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 60  # allow up to ~5 minutes for model download/warmup
           env:
             - name: DOWNLOAD_MODEL
               value: "true"
             - name: DEVICE
               value: cpu
+            - name: XDG_CACHE_HOME
+              value: /cache
+            - name: UV_CACHE_DIR
+              value: /cache/uv
+            - name: HF_HOME
+              value: /cache/hf
+            - name: PIP_CACHE_DIR
+              value: /cache/pip
           resources:
             requests:
-              cpu: 500m
-              memory: 1Gi
-            limits:
               cpu: "2"
               memory: 2Gi
+            limits:
+              cpu: "8"
+              memory: 4Gi
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
 ---
 apiVersion: v1
 kind: Service

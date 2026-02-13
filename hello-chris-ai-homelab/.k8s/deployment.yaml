@@ -31,6 +31,18 @@ spec:
           env:
             - name: TZ
               value: Etc/UTC
+            - name: OPENAI_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ha-api-credentials
+                  key: OLLAMA_URL
+            - name: OPENAI_API_BASE
+              valueFrom:
+                secretKeyRef:
+                  name: ha-api-credentials
+                  key: OLLAMA_URL
+            - name: OPENAI_API_KEY
+              value: "unused"
           readinessProbe:
             httpGet:
               path: /

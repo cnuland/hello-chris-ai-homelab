@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-voxtral-startup
+  namespace: voice
+  labels:
+    app.kubernetes.io/name: vllm-voxtral
+    app.kubernetes.io/part-of: voice-assistant
+data:
+  patch.sh: |
+    #!/bin/bash
+    set -e
+    SRC="/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/whisper_causal.py"
+    DST="/patches/whisper_causal.py"
+    echo "[init] Copying and patching whisper_causal.py for ROCm Triton backend"
+    cp "$SRC" "$DST"
+    sed -i 's/if not issubclass(underlying_attn_backend, FlashAttentionBackend):/if False:  # patched for ROCm Triton backend/' "$DST"
+    grep -n "patched for ROCm" "$DST" && echo "[init] Patch applied successfully" || echo "[init] WARNING: patch may have failed"
+    echo "[init] Installing vllm[audio] dependencies for Voxtral audio support"
+    pip install --target=/extra-pkgs soundfile librosa scipy "mistral_common[audio]"
+    echo "[init] Audio dependencies installed successfully"

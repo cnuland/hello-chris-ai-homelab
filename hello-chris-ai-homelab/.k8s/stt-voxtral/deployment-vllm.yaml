@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-voxtral
+  namespace: voice
+  labels:
+    app.kubernetes.io/name: vllm-voxtral
+    app.kubernetes.io/part-of: voice-assistant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm-voxtral
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm-voxtral
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker-01.ironman.cjlabs.dev
+      initContainers:
+        - name: patch-whisper
+          image: rocm/vllm-dev:nightly_main_20260208
+          command:
+            - bash
+            - /scripts/patch.sh
+          volumeMounts:
+            - name: patches
+              mountPath: /patches
+            - name: extra-pkgs
+              mountPath: /extra-pkgs
+            - name: scripts
+              mountPath: /scripts
+      containers:
+        - name: vllm
+          image: rocm/vllm-dev:nightly_main_20260208
+          imagePullPolicy: Always
+          command:
+            - python3
+            - -m
+            - vllm.entrypoints.openai.api_server
+          args:
+            - "--model"
+            - "mistralai/Voxtral-Mini-3B-2507"
+            - "--tokenizer-mode"
+            - "mistral"
+            - "--config-format"
+            - "mistral"
+            - "--load-format"
+            - "mistral"
+            - "--trust-remote-code"
+            - "--tensor-parallel-size"
+            - "1"
+            - "--max-model-len"
+            - "16384"
+            - "--max-num-batched-tokens"
+            - "8192"
+            - "--gpu-memory-utilization"
+            - "0.90"
+            - "--enforce-eager"
+            - "--attention-backend"
+            - "ROCM_ATTN"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8000"
+          env:
+            - name: HOME
+              value: /tmp/vllm-home
+            - name: HF_HOME
+              value: /model-cache
+            - name: VLLM_LOGGING_LEVEL
+              value: INFO
+            - name: ROCM_PATH
+              value: /opt/rocm
+            - name: VLLM_TARGET_DEVICE
+              value: rocm
+            - name: HSA_OVERRIDE_GFX_VERSION
+              value: "11.0.0"
+            - name: NCCL_P2P_DISABLE
+              value: "1"
+            - name: AMD_SERIALIZE_KERNEL
+              value: "3"
+            - name: HSA_ENABLE_SDMA
+              value: "0"
+            - name: HIP_LAUNCH_BLOCKING
+              value: "1"
+            - name: VLLM_USE_TRITON_FLASH_ATTN
+              value: "0"
+            - name: TORCHINDUCTOR_DISABLE
+              value: "1"
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HUGGING_FACE_HUB_TOKEN
+                  name: hf-token
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HF_TOKEN
+                  name: hf-token
+            - name: PYTHONNOUSERSITE
+              value: "1"
+            - name: PYTHONPATH
+              value: "/extra-pkgs"
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              amd.com/gpu: "1"
+              memory: 8Gi
+            limits:
+              amd.com/gpu: "1"
+              memory: 32Gi
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+            - name: shm
+              mountPath: /dev/shm
+            - name: patches
+              mountPath: /usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/whisper_causal.py
+              subPath: whisper_causal.py
+            - name: extra-pkgs
+              mountPath: /extra-pkgs
+          workingDir: /
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: vllm-voxtral-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: patches
+          emptyDir: {}
+        - name: extra-pkgs
+          emptyDir: {}
+        - name: scripts
+          configMap:
+            name: vllm-voxtral-startup
+            defaultMode: 0755

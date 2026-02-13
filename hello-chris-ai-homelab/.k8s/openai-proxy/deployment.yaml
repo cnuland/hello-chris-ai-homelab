@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openai-proxy
+  namespace: home-assistant
+  labels:
+    app.kubernetes.io/name: openai-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openai-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openai-proxy
+    spec:
+      serviceAccountName: home-assistant
+      containers:
+        - name: proxy
+          image: python:3.11-alpine
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: ha-api-credentials
+            - secretRef:
+                name: minio-credentials
+          env:
+            - name: UPSTREAM_BASE
+              valueFrom:
+                secretKeyRef:
+                  name: ha-api-credentials
+                  key: LLAMASTACK_URL
+            - name: PROXY_BACKEND
+              value: "llamastack"
+            - name: PROXY_DEFAULT_MODEL
+              value: "gpt-oss:20b"
+            - name: PROXY_TIMEOUT
+              value: "120"
+            - name: PROXY_READ_TIMEOUT
+              value: "360"
+            - name: PROXY_NS_ALIASES
+              value: "minecraft:minecraft;home assistant:home-assistant;home-assistant:home-assistant;voice:voice;gpt:gpt-oss;ollama:gpt-oss;llama:llama-stack"
+            - name: CLAUDE_CODE_URL
+              value: "http://claude-code-agent.home-assistant.svc.cluster.local:8010"
+          command: ["/bin/sh","-lc"]
+          args:
+            - >-
+              pip install --no-cache-dir fastapi==0.115.0 uvicorn==0.30.6 httpx==0.27.2 kubernetes==30.1.0 pyyaml==6.0.2 "llama-stack-client==0.2.12" minio==7.2.15 &&
+              uvicorn app:app --host 0.0.0.0 --port 8005
+          ports:
+            - name: http
+              containerPort: 8005
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          workingDir: /app
+      volumes:
+        - name: code
+          configMap:
+            name: openai-proxy-code

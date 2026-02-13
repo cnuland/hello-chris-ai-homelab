@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wyoming-voxtral
+  namespace: voice
+  labels:
+    app.kubernetes.io/name: wyoming-voxtral
+    app.kubernetes.io/part-of: voice-assistant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wyoming-voxtral
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wyoming-voxtral
+    spec:
+      containers:
+        - name: wyoming
+          image: ghcr.io/roryeckel/wyoming_openai:latest
+          imagePullPolicy: Always
+          env:
+            - name: WYOMING_URI
+              value: "tcp://0.0.0.0:10300"
+            - name: WYOMING_LOG_LEVEL
+              value: "INFO"
+            - name: WYOMING_LANGUAGES
+              value: "en ar fr es de it pt zh ja ko ru hi nl tr pl sv"
+            - name: STT_OPENAI_URL
+              value: "http://vllm-voxtral.voice.svc.cluster.local:8000/v1"
+            - name: STT_OPENAI_KEY
+              value: "unused"
+            - name: STT_MODELS
+              value: "mistralai/Voxtral-Mini-3B-2507"
+            - name: STT_BACKEND
+              value: "OPENAI"
+          ports:
+            - name: wyoming
+              containerPort: 10300
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi

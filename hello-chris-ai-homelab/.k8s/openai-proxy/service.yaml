@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: openai-proxy
+  namespace: home-assistant
+  labels:
+    app.kubernetes.io/name: openai-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: openai-proxy
+  ports:
+    - name: http
+      port: 8005
+      targetPort: http

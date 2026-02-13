@@ -10,21 +10,64 @@ data:
   postinstall.sh: |
     #!/bin/sh
     set -euo pipefail
+    echo "[postinstall] Cleaning custom_components root of stray files to ensure integrations load..."
+    CC=/config/custom_components
+    ts=$(date +%Y%m%d%H%M%S)
+    mkdir -p "$CC/_root_backup_$ts"
+    # Move only files (not directories) at the root of custom_components away (keeps subdirs like openai_tts/)
+    find "$CC" -maxdepth 1 -type f -print -exec mv {} "$CC/_root_backup_$ts/" \;
+    echo "[postinstall] Cleaned."
+    # Set internal/external URLs in configuration.yaml from env if provided
     CFG=/config/configuration.yaml
-    echo "[postinstall] Updating $CFG with OpenAI TTS if missing..."
-    if ! grep -q "openai_tts" "$CFG"; then
-      printf '\n' >> "$CFG"
-      printf '# Added by ha-addons postinstall: Kokoro via OpenAI-compatible TTS\n' >> "$CFG"
-      printf 'tts:\n' >> "$CFG"
-      printf '  - platform: openai_tts\n' >> "$CFG"
-      printf '    api_base: "https://kokoro-tts-voice.apps.ironman.cjlabs.dev/v1"\n' >> "$CFG"
-      printf '    api_key: "REPLACE_ME"\n' >> "$CFG"
-      printf '    model: "kokoro"\n' >> "$CFG"
-      printf '    voice: "af_bella"\n' >> "$CFG"
-      echo "[postinstall] Appended TTS block."
-    else
-      echo "[postinstall] TTS openai_tts already present, skipping."
+    INT_URL=${HA_INTERNAL_URL:-}
+    EXT_URL=${HA_EXTERNAL_URL:-}
+    echo "[postinstall] Setting URLs in $CFG (if provided)"
+    if [ -n "$INT_URL" ]; then
+      sed -i "s#internal_url: \"http://home-assistant.home-assistant.svc.cluster.local:8123\"#internal_url: \"$INT_URL\"#" "$CFG" || true
     fi
+    if [ -n "$EXT_URL" ]; then
+      sed -i "s#external_url: \"https://home-assistant-home-assistant.apps.ironman.cjlabs.dev\"#external_url: \"$EXT_URL\"#" "$CFG" || true
+    fi
+    # Patch OpenAI TTS integration for longer HTTP timeout and ensure 'voice' option is supported
+    TTS_DIR="$CC/openai_tts"
+    if [ -d "$TTS_DIR" ]; then
+      # Increase HTTP timeout in engine
+      TFILE="$TTS_DIR/openaitts_engine.py"
+      if [ -f "$TFILE" ]; then
+        TO=${OPENAI_TTS_TIMEOUT:-90}
+        echo "[postinstall] Ensuring OpenAI TTS timeout=${TO}s"
+        sed -i "s/timeout=30/timeout=${TO}/" "$TFILE" || true
+      fi
+      # Ensure 'voice' is in supported options (idempotent)
+      TPY="$TTS_DIR/tts.py"
+      if [ -f "$TPY" ]; then
+        if ! grep -q "\"voice\"" "$TPY"; then
+          echo "[postinstall] Adding 'voice' to supported_options"
+          sed -i "s/supported_options(self): return \[/supported_options(self): return [\"voice\", /" "$TPY" || true
+        fi
+      fi
+    fi
+    # Patch OpenAI TTS integration for longer HTTP timeout and ensure 'voice' option is supported
+    TTS_DIR="$CC/openai_tts"
+    if [ -d "$TTS_DIR" ]; then
+      # Increase HTTP timeout in engine
+      TFILE="$TTS_DIR/openaitts_engine.py"
+      if [ -f "$TFILE" ]; then
+        TO=${OPENAI_TTS_TIMEOUT:-90}
+        echo "[postinstall] Ensuring OpenAI TTS timeout=${TO}s"
+        sed -i "s/timeout=30/timeout=${TO}/" "$TFILE" || true
+      fi
+      # Ensure 'voice' is in supported options (idempotent)
+      TPY="$TTS_DIR/tts.py"
+      if [ -f "$TPY" ]; then
+        if ! grep -q '"voice"' "$TPY"; then
+          echo "[postinstall] Adding 'voice' to supported_options"
+          sed -i "s/supported_options(self): return \[/supported_options(self): return [\"voice\", /" "$TPY" || true
+        fi
+      fi
+    fi
+    # No longer inject YAML TTS config; TTS is configured via the ha-api job (configure.py)
+    echo "[postinstall] Skipping legacy YAML TTS injection; managed by config entries."
     echo "[postinstall] Restarting Home Assistant by deleting pod..."
     kubectl -n home-assistant delete pod -l app.kubernetes.io/name=home-assistant --ignore-not-found --wait=true
     echo "[postinstall] Done."

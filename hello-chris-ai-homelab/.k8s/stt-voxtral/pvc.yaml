@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-voxtral-cache
+  namespace: voice
+  labels:
+    app.kubernetes.io/name: vllm-voxtral
+    app.kubernetes.io/part-of: voice-assistant
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-storage
+  resources:
+    requests:
+      storage: 20Gi

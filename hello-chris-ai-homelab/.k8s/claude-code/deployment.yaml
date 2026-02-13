@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-code-agent
+  namespace: home-assistant
+  labels:
+    app.kubernetes.io/name: claude-code-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: claude-code-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: claude-code-agent
+    spec:
+      serviceAccountName: home-assistant
+      containers:
+        - name: agent
+          image: node:18-slim
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CLAUDE_CODE_USE_VERTEX
+              value: "1"
+            - name: CLOUD_ML_REGION
+              value: "us-east5"
+            - name: ANTHROPIC_VERTEX_PROJECT_ID
+              value: "itpc-gcp-product-all-claude"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/gcp/application_default_credentials.json"
+            - name: WORKSPACE
+              value: "/workspace"
+            - name: HOME
+              value: "/tmp"
+          command: ["/bin/sh", "-c"]
+          args:
+            - >-
+              apt-get update -qq &&
+              apt-get install -y -qq python3 python3-pip python3-venv git curl jq > /dev/null 2>&1 &&
+              npm install -g @anthropic-ai/claude-code &&
+              pip3 install --no-cache-dir --break-system-packages fastapi==0.115.0 uvicorn==0.30.6 > /dev/null 2>&1 &&
+              mkdir -p /tmp/.claude &&
+              echo '{"hasCompletedOnboarding":true}' > /tmp/.claude.json &&
+              if [ -z "$(ls -A /workspace 2>/dev/null)" ]; then
+                echo "Cloning homelab repo into /workspace..." &&
+                git clone https://github.com/cnuland/hello-chris-ai-homelab.git /workspace || true;
+              fi &&
+              echo "Starting task-runner..." &&
+              cd /app &&
+              python3 -m uvicorn task-runner:app --host 0.0.0.0 --port 8010
+          ports:
+            - name: http
+              containerPort: 8010
+          volumeMounts:
+            - name: gcp-creds
+              mountPath: /gcp
+              readOnly: true
+            - name: workspace
+              mountPath: /workspace
+            - name: code
+              mountPath: /app
+          workingDir: /app
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 90
+            periodSeconds: 10
+            failureThreshold: 12
+      volumes:
+        - name: gcp-creds
+          secret:
+            secretName: gcp-adc
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: claude-code-workspace
+        - name: code
+          configMap:
+            name: claude-code-runner

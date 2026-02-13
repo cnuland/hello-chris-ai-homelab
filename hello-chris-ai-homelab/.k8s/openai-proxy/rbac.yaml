@@ -1,0 +1,24 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openai-proxy-read
+rules:
+  - apiGroups: [""]
+    resources: ["pods","pods/log","namespaces"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods","nodes"]
+    verbs: ["get","list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openai-proxy-read-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: openai-proxy-read
+subjects:
+  - kind: ServiceAccount
+    name: home-assistant
+    namespace: home-assistant
