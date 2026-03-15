@@ -1,0 +1,47 @@
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: KeycloakRealmImport
+metadata:
+  name: openshift-realm
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/part-of: keycloak
+spec:
+  keycloakCRName: keycloak
+  realm:
+    realm: openshift
+    enabled: true
+    displayName: OpenShift Homelab
+    registrationAllowed: true
+    registrationEmailAsUsername: false
+    loginWithEmailAllowed: true
+    duplicateEmailsAllowed: false
+    resetPasswordAllowed: true
+    editUsernameAllowed: false
+    bruteForceProtected: true
+    clients:
+      - clientId: openshift
+        name: OpenShift
+        enabled: true
+        clientAuthenticatorType: client-secret
+        secret: "REPLACE_ME_WITH_OIDC_CLIENT_SECRET"
+        redirectUris:
+          - "https://oauth-openshift.apps.ironman.cjlabs.dev/oauth2callback/keycloak"
+        standardFlowEnabled: true
+        directAccessGrantsEnabled: false
+        publicClient: false
+        protocol: openid-connect
+        defaultClientScopes:
+          - openid
+          - email
+          - profile
+    users:
+      - username: cnuland
+        enabled: true
+        emailVerified: true
+        firstName: Chris
+        lastName: Nuland
+        credentials:
+          - type: password
+            value: "REPLACE_ME_WITH_TEMP_PASSWORD"
+            temporary: true
