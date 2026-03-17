@@ -114,12 +114,13 @@ data:
 
     def ensure_openai_conversation():
       # Create OpenAI Conversation provider (ChatGPT integration) so pipelines can use it
+      ollama_api_key = os.environ.get('OLLAMA_API_KEY','unused')
       created = False
       try:
         init = rest('POST','/api/config/config_entries/flow', { 'handler': 'openai_conversation', 'show_advanced_options': True })
         fid = init.get('flow_id')
         if fid:
-          step = rest('POST', f"/api/config/config_entries/flow/{fid}", { 'api_key': 'unused' })
+          step = rest('POST', f"/api/config/config_entries/flow/{fid}", { 'api_key': ollama_api_key })
           if step.get('type') == 'create_entry':
             print('[ok] Created OpenAI Conversation entry')
             created = True
@@ -149,13 +150,14 @@ data:
               data['base_url'] = ollama_url
             if ollama_model:
               data['model'] = ollama_model
-            title = 'Ollama Conversation'
+            data['api_key'] = ollama_api_key
+            title = 'Shadow VA'
             # send update
             ws.send(json.dumps({ 'id': eid, 'type': 'config_entries/entry/update', 'entry_id': entry_id, 'title': title, 'data': data })); eid += 1
             _ = json.loads(ws.recv())
             updated_any = True
         if updated_any:
-          print('[ok] Reconfigured OpenAI Conversation to Ollama and renamed to "Ollama Conversation"')
+          print('[ok] Reconfigured OpenAI Conversation to Shadow VA')
         ws.close()
       except Exception as e:
         print('[warn] Could not reconfigure OpenAI Conversation via WS:', e)
@@ -171,7 +173,7 @@ data:
           names = [f.get('name') for f in init.get('data_schema',[])] if isinstance(init, dict) else []
           payload = {}
           if 'api_key' in names:
-            payload['api_key'] = 'unused'
+            payload['api_key'] = ollama_api_key
           key = None
           for k in ('base_url','api_base','base','api_endpoint'):
             if k in names:

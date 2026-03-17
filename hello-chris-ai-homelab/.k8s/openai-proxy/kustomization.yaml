@@ -4,6 +4,7 @@ namespace: home-assistant
 resources:
   - deployment.yaml
   - service.yaml
+  - service-nodeport.yaml
   - rbac.yaml
 configMapGenerator:
   - name: openai-proxy-code

@@ -1,6 +1,7 @@
 import os, json, logging, time, uuid, asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 import httpx
 
 # Optional: Kubernetes client for tool execution
@@ -13,11 +14,11 @@ except Exception:
 # Server-side LlamaStack tool invocation via HTTP
 HAVE_LS = True  # Assume reachable via UPSTREAM; we will handle errors at runtime
 
-UPSTREAM = os.environ.get("UPSTREAM_BASE", "http://ollama-gpt-oss-120b.gpt-oss.svc.cluster.local:11434").rstrip("/")
+UPSTREAM = os.environ.get("UPSTREAM_BASE", "http://ollama-qwen3-30b.gpt-oss.svc.cluster.local:11434").rstrip("/")
 BACKEND = os.environ.get("PROXY_BACKEND", "ollama").strip().lower()
-TIMEOUT = float(os.environ.get("PROXY_TIMEOUT", "60"))
-READ_TIMEOUT = float(os.environ.get("PROXY_READ_TIMEOUT", str(max(120, int(TIMEOUT)))))
-DEFAULT_MODEL = os.environ.get("PROXY_DEFAULT_MODEL", "gpt-oss:120b")
+TIMEOUT = float(os.environ.get("PROXY_TIMEOUT", "120"))
+READ_TIMEOUT = float(os.environ.get("PROXY_READ_TIMEOUT", str(max(180, int(TIMEOUT)))))
+DEFAULT_MODEL = os.environ.get("PROXY_DEFAULT_MODEL", "qwen3:30b-a3b")
 DEFAULT_MAX_TOKENS = int(os.environ.get("PROXY_DEFAULT_MAX_TOKENS", "256"))
 MAX_TOKENS_CAP = int(os.environ.get("PROXY_MAX_TOKENS_CAP", "120"))
 # Weather config (fallback via Open-Meteo APIs)
@@ -41,6 +42,10 @@ MINIO_ACCESS_KEY = os.environ.get("MINIO_ROOT_USER", "minioadmin")
 MINIO_SECRET_KEY = os.environ.get("MINIO_ROOT_PASSWORD", "")
 MINIO_DEFAULT_BUCKET = os.environ.get("MINIO_DEFAULT_BUCKET", "claude-results")
 MINIO_SECURE = MINIO_ENDPOINT.startswith("https")
+MINIO_EXTERNAL_ENDPOINT = os.environ.get("MINIO_EXTERNAL_ENDPOINT", "http://10.0.10.10:31290")
+# API key authentication (empty = no auth required, for backward compat with HA internal calls)
+PROXY_API_KEY = os.environ.get("PROXY_API_KEY", "")
+UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
 
 try:
     from minio import Minio
@@ -53,6 +58,33 @@ logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
 log = logging.getLogger("openai-proxy")
 
 app = FastAPI(title="OpenAI Responses->Chat Completions Proxy")
+
+# ---------- API key authentication middleware ----------
+_AUTH_EXEMPT_PATHS = {"/health"}
+# Cluster-internal pod/service CIDRs — requests from these are trusted (HA, etc.)
+_INTERNAL_PREFIXES = ("10.128.", "10.129.", "10.130.", "10.131.", "172.30.", "127.0.0.1")
+
+class ApiKeyMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if not PROXY_API_KEY:
+            return await call_next(request)
+        if request.url.path in _AUTH_EXEMPT_PATHS:
+            return await call_next(request)
+        # Trust cluster-internal traffic (pods, services)
+        client_ip = request.client.host if request.client else ""
+        if any(client_ip.startswith(p) for p in _INTERNAL_PREFIXES):
+            return await call_next(request)
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+        else:
+            token = request.query_params.get("api_key", "")
+        if token != PROXY_API_KEY:
+            log.warning("auth: rejected request from %s to %s", client_ip, request.url.path)
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+app.add_middleware(ApiKeyMiddleware)
 
 _models_cache = None
 _llama_client = None
@@ -104,15 +136,20 @@ def _extract_messages_from_input(_input) -> list:
         messages.append({"role": "user", "content": _input})
     return messages
 
+def _upstream_headers():
+    if UPSTREAM_API_KEY:
+        return {"Authorization": f"Bearer {UPSTREAM_API_KEY}"}
+    return {}
+
 async def post_json(client: httpx.AsyncClient, path: str, data: dict):
     url = f"{UPSTREAM}{path}"
-    r = await client.post(url, json=data, timeout=TIMEOUT)
+    r = await client.post(url, json=data, headers=_upstream_headers(), timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
 
 async def get_json(client: httpx.AsyncClient, path: str):
     url = f"{UPSTREAM}{path}"
-    r = await client.get(url, timeout=TIMEOUT)
+    r = await client.get(url, headers=_upstream_headers(), timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
 
@@ -436,8 +473,115 @@ async def minio_upload(content: str, object_name: str, bucket: str = None) -> di
         log.warning("MinIO upload failed: %s", e)
         return {"error": f"MinIO upload failed: {e}"}
 
+async def minio_list_files(bucket: str = None, prefix: str = None) -> dict:
+    """List objects in a MinIO bucket."""
+    mc = _get_minio_client()
+    if not mc:
+        return {"error": "MinIO client not available"}
+    bucket = bucket or MINIO_DEFAULT_BUCKET
+    try:
+        _ensure_minio_bucket(bucket)
+        objects = list(mc.list_objects(bucket, prefix=prefix, recursive=True))
+        files = []
+        for obj in objects[:50]:  # cap at 50
+            files.append({
+                "name": obj.object_name,
+                "size_bytes": obj.size,
+                "last_modified": obj.last_modified.isoformat() if obj.last_modified else None,
+            })
+        return {"bucket": bucket, "prefix": prefix, "count": len(files), "files": files}
+    except Exception as e:
+        log.warning("minio_list_files failed: %s", e)
+        return {"error": f"MinIO list failed: {e}"}
+
+async def minio_get_file(object_name: str, bucket: str = None) -> dict:
+    """Read a file's content from MinIO (text files only, max 50KB)."""
+    mc = _get_minio_client()
+    if not mc:
+        return {"error": "MinIO client not available"}
+    bucket = bucket or MINIO_DEFAULT_BUCKET
+    try:
+        response = mc.get_object(bucket, object_name)
+        data = response.read(50 * 1024)  # max 50KB
+        response.close()
+        response.release_conn()
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError:
+            content = f"(binary file, {len(data)} bytes)"
+        return {"bucket": bucket, "object_name": object_name, "size_bytes": len(data), "content": content}
+    except Exception as e:
+        log.warning("minio_get_file failed: %s", e)
+        return {"error": f"MinIO get failed: {e}"}
+
+_minio_external_client = None
+
+def _get_minio_external_client():
+    """Get a MinIO client pointed at the external endpoint for presigned URLs."""
+    global _minio_external_client
+    if _minio_external_client is not None:
+        return _minio_external_client
+    if not HAVE_MINIO or not MINIO_SECRET_KEY:
+        return None
+    ext = MINIO_EXTERNAL_ENDPOINT
+    endpoint = ext.replace("https://", "").replace("http://", "")
+    secure = ext.startswith("https")
+    _minio_external_client = Minio(endpoint, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=secure)
+    return _minio_external_client
+
+def minio_get_download_link(object_name: str, bucket: str = None, expires_hours: int = 168) -> dict:
+    """Generate a presigned download URL for a MinIO object using the external endpoint."""
+    mc = _get_minio_external_client()
+    if not mc:
+        return {"error": "MinIO external client not available"}
+    bucket = bucket or MINIO_DEFAULT_BUCKET
+    try:
+        from datetime import timedelta
+        url = mc.presigned_get_object(bucket, object_name, expires=timedelta(hours=expires_hours))
+        return {"bucket": bucket, "object_name": object_name, "url": url, "expires_hours": expires_hours}
+    except Exception as e:
+        log.warning("minio_get_download_link failed: %s", e)
+        return {"error": f"MinIO presigned URL failed: {e}"}
+
 # ---------- Claude Code -> MinIO background worker ----------
 _minio_pending_tasks: dict[str, dict] = {}
+
+async def _upload_workspace_files(client: httpx.AsyncClient, task_id: str, bucket: str, object_prefix: str) -> list:
+    """Fetch generated files from Claude Code workspace and upload them to MinIO."""
+    uploaded = []
+    try:
+        r = await client.get(f"{CLAUDE_CODE_URL}/files", timeout=15)
+        r.raise_for_status()
+        files_data = r.json()
+    except Exception as e:
+        log.warning("minio-worker: could not list workspace files: %s", e)
+        return uploaded
+    mc = _get_minio_client()
+    if not mc:
+        return uploaded
+    _ensure_minio_bucket(bucket)
+    for f in files_data.get("files", []):
+        fpath = f.get("path", "")
+        size = f.get("size_bytes", 0)
+        if size < 10 or size > 50_000_000:  # skip tiny/huge files
+            continue
+        try:
+            fr = await client.get(f"{CLAUDE_CODE_URL}/files/{fpath}", timeout=30)
+            fr.raise_for_status()
+            data = fr.content
+            obj_name = f"{object_prefix}/{task_id}/{fpath}"
+            # Guess content type
+            ext = fpath.rsplit(".", 1)[-1].lower() if "." in fpath else ""
+            ct_map = {"pdf":"application/pdf","md":"text/markdown","txt":"text/plain","json":"application/json",
+                      "csv":"text/csv","html":"text/html","yaml":"text/yaml","yml":"text/yaml",
+                      "py":"text/x-python","sh":"text/x-shellscript","png":"image/png","jpg":"image/jpeg","svg":"image/svg+xml"}
+            ct = ct_map.get(ext, "application/octet-stream")
+            mc.put_object(bucket, obj_name, BytesIO(data), length=len(data), content_type=ct)
+            log.info("minio-worker: uploaded workspace file %s -> %s/%s (%d bytes)", fpath, bucket, obj_name, len(data))
+            uploaded.append({"path": fpath, "object_name": obj_name, "size_bytes": len(data)})
+        except Exception as e:
+            log.warning("minio-worker: failed to upload workspace file %s: %s", fpath, e)
+    return uploaded
 
 async def _claude_to_minio_worker(task_id: str, bucket: str, object_prefix: str):
     poll_interval = 5
@@ -455,6 +599,7 @@ async def _claude_to_minio_worker(task_id: str, bucket: str, object_prefix: str)
                 continue
             status = task_data.get("status")
             if status in ("completed", "failed"):
+                # Upload task result JSON
                 result = task_data.get("result")
                 if result is None:
                     result = task_data.get("error") or "no output"
@@ -466,14 +611,19 @@ async def _claude_to_minio_worker(task_id: str, bucket: str, object_prefix: str)
                     ext = ".txt"
                 object_name = f"{object_prefix}/{task_id}{ext}"
                 upload_result = await minio_upload(content, object_name, bucket)
-                if "error" in upload_result:
+                # Upload all generated workspace files (PDFs, MDs, etc.)
+                workspace_uploads = await _upload_workspace_files(client, task_id, bucket, object_prefix)
+                file_count = len(workspace_uploads)
+                if "error" in upload_result and file_count == 0:
                     log.warning("minio-worker: upload failed for task %s: %s", task_id, upload_result["error"])
                     await ha_tts_speak(f"Your Claude Code task has finished, but the upload to MinIO failed.")
                 else:
-                    log.info("minio-worker: task %s result uploaded to %s/%s", task_id, bucket, object_name)
-                    await ha_tts_speak(f"Your Claude Code task has finished and the results have been uploaded to the {bucket} bucket in MinIO.")
+                    log.info("minio-worker: task %s result + %d files uploaded to %s", task_id, file_count, bucket)
+                    file_msg = f" along with {file_count} generated files" if file_count else ""
+                    await ha_tts_speak(f"Your Claude Code task has finished and the results{file_msg} have been uploaded to the {bucket} bucket in MinIO.")
                 _minio_pending_tasks[task_id]["upload"] = upload_result
-                _minio_pending_tasks[task_id]["status"] = "uploaded" if "error" not in upload_result else "upload_failed"
+                _minio_pending_tasks[task_id]["workspace_files"] = workspace_uploads
+                _minio_pending_tasks[task_id]["status"] = "uploaded" if "error" not in upload_result or file_count > 0 else "upload_failed"
                 return
             elif status == "cancelled":
                 log.info("minio-worker: task %s was cancelled, skipping upload", task_id)
@@ -770,19 +920,20 @@ async def responses(req: Request):
             timeout = httpx.Timeout(connect=TIMEOUT, read=READ_TIMEOUT, write=TIMEOUT, pool=TIMEOUT)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 if _is_llamastack():
-                    # Fetch tools once and attach
-                    tools_res = await get_json(client, "/v1/tools")
+                    # Fetch tools from upstream (graceful if not supported)
                     tools = []
-                    for t in tools_res.get("data", []):
-                        # Advertise all server-side tools from LlamaStack; execution is routed appropriately.
-                        tools.append({"type":"function","function":{"name": t.get("name"), "parameters": t.get("input_schema") or {"type":"object"}}})
-                    # Add Claude Code tools (proxy-side, not in LlamaStack)
+                    try:
+                        tools_res = await get_json(client, "/v1/tools")
+                        for t in tools_res.get("data", []):
+                            tools.append({"type":"function","function":{"name": t.get("name"), "parameters": t.get("input_schema") or {"type":"object"}}})
+                    except Exception:
+                        pass  # Upstream (e.g. OpenClaw) may not support /v1/tools
+                    # Add Claude Code tools (proxy-side)
                     tools.append({"type":"function","function":{"name":"claude_code_submit","description":"Submit a coding task to the Claude Code agent running in the cluster. Use when the user asks Claude Code to do something.","parameters":{"type":"object","properties":{"prompt":{"type":"string","description":"The task description for Claude Code"}},"required":["prompt"]}}})
                     tools.append({"type":"function","function":{"name":"claude_code_status","description":"Check the status of Claude Code tasks. Call with no arguments to list all tasks, or with a task_id to get details on a specific task.","parameters":{"type":"object","properties":{"task_id":{"type":"string","description":"Optional task ID to check. Omit to list all tasks."}}}}})
                     tools.append({"type":"function","function":{"name":"claude_code_submit_to_minio","description":"Submit a coding task to Claude Code and automatically upload the result to MinIO object storage when complete. Use when the user wants Claude Code output stored in MinIO.","parameters":{"type":"object","properties":{"prompt":{"type":"string","description":"The task description for Claude Code"},"bucket":{"type":"string","description":"MinIO bucket name (default: claude-results)"},"object_prefix":{"type":"string","description":"Path prefix in the bucket (default: claude-tasks)"}},"required":["prompt"]}}})
-                    # Add a gentle system hint about tool usage and voice-optimized responses
-                    sys_hint = {"role":"system","content":"You are a helpful voice assistant. Keep responses brief and conversational - aim for 1-3 sentences unless more detail is explicitly requested. Be direct and get to the point quickly. Avoid unnecessary preamble, lists, or markdown formatting unless specifically asked. Since your responses will be spoken aloud, always spell out units fully (say 'degrees Fahrenheit' not '°F', 'miles per hour' not 'mph', etc.). You have Kubernetes tools (pods_list_in_namespace, pods_get, pods_log, pods_top), Weather tools (get_current_weather, get_weather_forecast), Web Search (web_search), Claude Code tools (claude_code_submit to give Claude Code a task, claude_code_status to check task progress, claude_code_submit_to_minio to submit a task and automatically upload results to MinIO object storage). Use them to answer cluster, weather, web, and coding questions. Do not say you lack access; instead, call a tool. You understand multiple languages. If you receive text in a non-English language (Arabic, French, Spanish, etc.), translate it to English and summarize the content. IMPORTANT: The speech-to-text system may automatically translate non-English audio (such as Arabic, French, Spanish, etc.) into English during transcription. If the user asks you to translate or listen to something in another language and the transcribed text is already in English, do NOT say 'this is already in English' — instead, simply summarize and present the content. The translation has already been done for you by the STT system. Always respond in English unless explicitly asked to respond in another language."}
-                    msg_with_hint = [sys_hint] + messages
+                    # No system prompt override — let upstream (ShadowBot/OpenClaw) handle identity via SOUL.md
+                    msg_with_hint = messages
                     # Decide tool_choice based ONLY on the latest user message (avoid triggering on assistant/system text)
                     user_text = ""
                     for m in reversed(messages):
@@ -1242,14 +1393,244 @@ async def responses(req: Request):
 @app.post("/v1/chat/completions")
 async def passthrough_chat(req: Request):
     body = await req.json()
-    # Ensure non-streaming for JSON parse
     body.setdefault("stream", False)
-    async with httpx.AsyncClient() as client:
-        body["model"] = await ensure_model(client, body.get("model"))
-        log.info("/v1/chat/completions using model=%s", body["model"])
+    messages = body.get("messages", [])
+    timeout = httpx.Timeout(connect=TIMEOUT, read=READ_TIMEOUT, write=TIMEOUT, pool=TIMEOUT)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        model = await ensure_model(client, body.get("model"))
+        body["model"] = model
+        log.info("/v1/chat/completions using model=%s", model)
+
+        # Extract latest user text for keyword detection
+        user_text = ""
+        for m in reversed(messages):
+            if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+                user_text = m["content"]
+                break
+        user_low = user_text.lower()
+        k8s_like = any(w in user_low for w in ["kubernetes","namespace","pod","deployment","statefulset","daemonset","node","cluster","minecraft","openshift","home assistant","home-assistant"])
+        weather_like = any(w in user_low for w in ["weather","forecast","temperature","rain","wind","snow","humidity"])
+        search_like = any(w in user_low for w in ["search","latest","news","according","web","internet","cite"]) and not k8s_like and not weather_like
+        claude_like = any(w in user_low for w in ["claude","claude code","code agent","code task","agent task"])
+        claude_status = claude_like and any(w in user_low for w in ["status","progress","how is","update","check","done","finished","result"])
+        minio_like = claude_like and any(w in user_low for w in ["minio","bucket","upload","store","save to","put it in"])
+        minio_query = any(w in user_low for w in ["minio","bucket","files","storage","stored","download","link"]) and not claude_like
+        needs_tools = k8s_like or weather_like or search_like or claude_like or minio_query
+
+        if not needs_tools:
+            # Simple passthrough — no tools needed
+            path = "/v1/chat/completions" if _is_llamastack() else "/api/chat"
+            comp = await post_json(client, path, body)
+            return JSONResponse(comp)
+
+        # ---------- Tool-aware path ----------
+        log.info("/v1/chat/completions [tool-aware] k8s=%s weather=%s search=%s claude=%s minio=%s", k8s_like, weather_like, search_like, claude_like, minio_like)
+
+        # Build tool definitions
+        tools = []
+        if k8s_like:
+            tools += [
+                {"type":"function","function":{"name":"cluster_operators","description":"Get OpenShift ClusterOperator health status","parameters":{"type":"object","properties":{}}}},
+                {"type":"function","function":{"name":"pods_list_in_namespace","description":"List pods in a Kubernetes namespace","parameters":{"type":"object","properties":{"namespace":{"type":"string"},"labelSelector":{"type":"string"}},"required":["namespace"]}}},
+                {"type":"function","function":{"name":"pods_list","description":"List pods across namespaces","parameters":{"type":"object","properties":{"namespace":{"type":"string"},"labelSelector":{"type":"string"}}}}},
+                {"type":"function","function":{"name":"pods_top","description":"Get pod resource usage (CPU/memory)","parameters":{"type":"object","properties":{"namespace":{"type":"string"},"name":{"type":"string"},"all_namespaces":{"type":"boolean"}}}}},
+            ]
+        if weather_like:
+            tools += [
+                {"type":"function","function":{"name":"get_current_weather","description":"Get current weather for a location","parameters":{"type":"object","properties":{"city":{"type":"string"},"units":{"type":"string","enum":["metric","imperial"]}},"required":["city"]}}},
+                {"type":"function","function":{"name":"get_weather_forecast","description":"Get weather forecast","parameters":{"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"},"units":{"type":"string"}},"required":["city"]}}},
+            ]
+        if search_like:
+            tools.append({"type":"function","function":{"name":"web_search","description":"Search the web","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}})
+        if claude_like:
+            tools += [
+                {"type":"function","function":{"name":"claude_code_submit","description":"Submit a coding task to Claude Code","parameters":{"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"]}}},
+                {"type":"function","function":{"name":"claude_code_status","description":"Check Claude Code task status","parameters":{"type":"object","properties":{"task_id":{"type":"string"}}}}},
+                {"type":"function","function":{"name":"claude_code_submit_to_minio","description":"Submit a Claude Code task and upload result to MinIO","parameters":{"type":"object","properties":{"prompt":{"type":"string"},"bucket":{"type":"string"},"object_prefix":{"type":"string"}},"required":["prompt"]}}},
+            ]
+        if minio_query or minio_like:
+            tools += [
+                {"type":"function","function":{"name":"minio_list_files","description":"List files stored in MinIO object storage","parameters":{"type":"object","properties":{"bucket":{"type":"string","description":"Bucket name (default: claude-results)"},"prefix":{"type":"string","description":"Path prefix filter"}}}}},
+                {"type":"function","function":{"name":"minio_get_file","description":"Read the content of a file from MinIO (text files, max 50KB)","parameters":{"type":"object","properties":{"object_name":{"type":"string","description":"Full object path in the bucket"},"bucket":{"type":"string","description":"Bucket name (default: claude-results)"}},"required":["object_name"]}}},
+                {"type":"function","function":{"name":"minio_get_download_link","description":"Generate a presigned download URL for a MinIO file. Returns an HTTPS link valid for 7 days.","parameters":{"type":"object","properties":{"object_name":{"type":"string","description":"Full object path in the bucket"},"bucket":{"type":"string","description":"Bucket name (default: claude-results)"},"expires_hours":{"type":"integer","description":"Link validity in hours (default: 168 = 7 days)"}},"required":["object_name"]}}},
+            ]
+
+        # Add system hint
+        sys_hint = {"role":"system","content":"You have access to tools for querying Kubernetes/OpenShift clusters, weather, web search, MinIO object storage, and Claude Code. Use the tools to answer questions with real data. Do not guess or provide generic guidance when you can call a tool. Keep responses concise. When listing MinIO files, include file names and sizes. When asked for download links, use the minio_get_download_link tool and return the URL directly."}
+        tool_messages = [sys_hint] + messages
+
+        # First turn: ask model with tools
         path = "/v1/chat/completions" if _is_llamastack() else "/api/chat"
-        comp = await post_json(client, path, body)
-    return JSONResponse(comp)
+        first_payload = {"model": model, "messages": tool_messages, "tools": tools, "tool_choice": "required", "stream": False, "temperature": 0.0}
+        first = await post_json(client, path, first_payload)
+        choice = (first.get("choices") or [{}])[0]
+        msg = choice.get("message", {})
+        tool_calls = msg.get("tool_calls") or []
+        log.info("/v1/chat/completions LLM-1> tool_calls=%d content=%r", len(tool_calls), (msg.get("content") or "")[:200])
+
+        # If model didn't use tools, auto-fallback
+        if not tool_calls:
+            default_ns = _detect_default_namespace(messages)
+            tool_name = None
+            auto_res = None
+            if k8s_like:
+                cluster_query = any(w in user_low for w in ["cluster", "all namespace", "all pods", "overview", "health", "operator"])
+                if cluster_query:
+                    auto_res = await k8s_cluster_operators()
+                    tool_name = "cluster_operators"
+                elif default_ns:
+                    auto_res = await k8s_pods_list_in_namespace(default_ns, None)
+                    tool_name = "pods_list_in_namespace"
+                else:
+                    auto_res = await k8s_pods_list(None, None)
+                    tool_name = "pods_list"
+            elif weather_like:
+                auto_res = await weather_get_current(client, user_text, None, None, None)
+                tool_name = "get_current_weather"
+            elif claude_like:
+                if claude_status:
+                    auto_res = await claude_code_status(client)
+                    tool_name = "claude_code_status"
+                else:
+                    task_prompt = user_text
+                    for w in ["ask claude code to","tell claude code to","have claude code","claude code","code agent","agent task"]:
+                        task_prompt = task_prompt.lower().replace(w, "")
+                    task_prompt = task_prompt.strip().strip(".,!?").strip() or user_text
+                    if minio_like:
+                        auto_res = await claude_code_submit_to_minio(client, task_prompt)
+                        tool_name = "claude_code_submit_to_minio"
+                    else:
+                        auto_res = await claude_code_submit(client, task_prompt)
+                        tool_name = "claude_code_submit"
+            elif minio_query:
+                download_query = any(w in user_low for w in ["download","link","url","get","read","show","content"])
+                if download_query:
+                    # Try to list files first, then generate links
+                    auto_res = await minio_list_files()
+                    tool_name = "minio_list_files"
+                else:
+                    auto_res = await minio_list_files()
+                    tool_name = "minio_list_files"
+
+            if auto_res is not None:
+                log.info("/v1/chat/completions AUTO-FALLBACK> %s", tool_name)
+                # Summarize locally for fast response
+                if tool_name == "cluster_operators":
+                    text = _summarize_cluster_operators(auto_res)
+                elif tool_name in ("pods_list_in_namespace", "pods_list"):
+                    text = _summarize_pods_list(auto_res) if "pods" in auto_res and default_ns else _summarize_pods_overview(auto_res) if "pods" in auto_res else str(auto_res)
+                elif tool_name == "claude_code_status":
+                    text = _summarize_claude_code_tasks(auto_res)
+                elif tool_name == "claude_code_submit_to_minio":
+                    task_id = auto_res.get("task_id", "unknown")
+                    bucket = auto_res.get("minio_bucket", MINIO_DEFAULT_BUCKET)
+                    text = f"Task submitted to Claude Code (ID: {task_id}). Results will be uploaded to MinIO bucket '{bucket}' when complete."
+                elif tool_name == "claude_code_submit":
+                    task_id = auto_res.get("task_id", "unknown")
+                    text = f"Task submitted to Claude Code (ID: {task_id}), status: {auto_res.get('status', 'unknown')}."
+                else:
+                    text = str(auto_res)
+                # Send to model for natural language response
+                follow = tool_messages + [msg, {"role":"tool","name":tool_name,"content":json.dumps(auto_res)}]
+                try:
+                    second = await post_json(client, path, {"model": model, "messages": follow, "stream": False})
+                    text2 = ((second.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                    if text2:
+                        text = text2
+                except Exception:
+                    pass  # use the local summary
+                log.info("/v1/chat/completions RESPONSE> %s", text[:300])
+                return JSONResponse({"id": f"chatcmpl-{uuid.uuid4().hex[:6]}", "choices": [{"finish_reason":"stop","index":0,"message":{"role":"assistant","content":text}}], "model": model, "object":"chat.completion"})
+            # No auto-fallback matched — return model's direct response
+            return JSONResponse(first)
+
+        # Execute tool calls
+        results = []
+        default_ns = _detect_default_namespace(messages)
+        for tc in tool_calls:
+            name = tc.get("function",{}).get("name") or tc.get("name")
+            args = tc.get("function",{}).get("arguments") or tc.get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {"raw": args}
+            if name in ("pods_list_in_namespace","pods_get","pods_log","pods_top") and args.get("namespace"):
+                args["namespace"] = args["namespace"].lower()
+            # Redirect cluster queries to cluster_operators
+            cluster_query = any(w in user_low for w in ["cluster","all namespace","all pods","overview","health","operator"])
+            if cluster_query and not default_ns and name in ("pods_list_in_namespace","pods_list","web_search"):
+                name = "cluster_operators"
+                args = {}
+            if default_ns and name in ("pods_list_in_namespace","pods_get","pods_log","pods_top"):
+                model_ns = args.get("namespace") or ""
+                if not model_ns or model_ns == "default":
+                    args["namespace"] = default_ns
+            log.info("/v1/chat/completions [tool-exec] %s(%s)", name, json.dumps(args)[:200])
+            result = {"error":"unknown tool"}
+            try:
+                if name == "cluster_operators":
+                    result = await k8s_cluster_operators()
+                elif name == "pods_list_in_namespace":
+                    result = await k8s_pods_list_in_namespace(args.get("namespace","default"), args.get("labelSelector") or args.get("label_selector"))
+                elif name == "pods_list":
+                    result = await k8s_pods_list(args.get("namespace"), args.get("labelSelector") or args.get("label_selector"))
+                elif name == "pods_get":
+                    result = await k8s_pods_get(args.get("name"), args.get("namespace"))
+                elif name == "pods_log":
+                    result = await k8s_pods_log(args.get("name"), args.get("namespace"), args.get("container"), args.get("tail"))
+                elif name == "pods_top":
+                    result = await k8s_pods_top(args.get("namespace"), args.get("name"), args.get("all_namespaces"), args.get("label_selector"))
+                elif name == "get_current_weather":
+                    city = args.get("city") or args.get("location")
+                    result = await weather_get_current(client, city, args.get("latitude"), args.get("longitude"), args.get("units"))
+                elif name == "get_weather_forecast":
+                    city = args.get("city") or args.get("location")
+                    result = await weather_get_forecast(client, city, args.get("latitude"), args.get("longitude"), args.get("days"), args.get("units"))
+                elif name == "web_search":
+                    if weather_like:
+                        city = user_text
+                        for w in ["what is the weather in","what's the weather in","weather in","forecast for","temperature in","right now","today","tonight","currently","current","weather"]:
+                            city = city.lower().replace(w, "")
+                        city = city.strip().strip("?.,!").strip() or user_text
+                        result = await weather_get_current(client, city, None, None, None)
+                    else:
+                        result = await web_search_tavily(client, args.get("query", user_text))
+                elif name == "claude_code_submit":
+                    result = await claude_code_submit(client, args.get("prompt",""))
+                elif name == "claude_code_status":
+                    result = await claude_code_status(client, args.get("task_id"))
+                elif name == "claude_code_submit_to_minio":
+                    result = await claude_code_submit_to_minio(client, args.get("prompt",""), args.get("bucket"), args.get("object_prefix","claude-tasks"))
+                elif name == "minio_list_files":
+                    result = await minio_list_files(args.get("bucket"), args.get("prefix"))
+                elif name == "minio_get_file":
+                    result = await minio_get_file(args.get("object_name",""), args.get("bucket"))
+                elif name == "minio_get_download_link":
+                    result = minio_get_download_link(args.get("object_name",""), args.get("bucket"), args.get("expires_hours", 168))
+            except Exception as e:
+                log.exception("/v1/chat/completions tool exec failed: %s", e)
+                result = {"error": f"tool execution failed: {e}"}
+            results.append({"role":"tool","tool_call_id":tc.get("id"),"name":name,"content":json.dumps(result)})
+            log.info("/v1/chat/completions TOOL-RESULT> %s -> %s", name, json.dumps(result)[:300])
+
+        # For single k8s/claude results, summarize locally for speed
+        if len(results) == 1:
+            try:
+                data = json.loads(results[0].get("content","{}"))
+                rname = results[0].get("name","")
+                if rname == "cluster_operators" and "operators" in data:
+                    text = _summarize_cluster_operators(data)
+                    log.info("/v1/chat/completions RESPONSE> (local summary) %s", text[:300])
+                    return JSONResponse({"id":f"chatcmpl-{uuid.uuid4().hex[:6]}","choices":[{"finish_reason":"stop","index":0,"message":{"role":"assistant","content":text}}],"model":model,"object":"chat.completion"})
+            except Exception:
+                pass
+
+        # Second turn with tool results
+        follow = tool_messages + [msg] + results
+        second = await post_json(client, path, {"model": model, "messages": follow, "stream": False})
+        log.info("/v1/chat/completions RESPONSE> %s", ((second.get("choices") or [{}])[0].get("message") or {}).get("content","")[:300])
+        return JSONResponse(second)
 
 @app.get("/v1/models")
 async def models():

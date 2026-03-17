@@ -31,10 +31,15 @@ spec:
                 secretKeyRef:
                   name: ha-api-credentials
                   key: LLAMASTACK_URL
+            - name: UPSTREAM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ha-api-credentials
+                  key: OLLAMA_API_KEY
             - name: PROXY_BACKEND
               value: "llamastack"
             - name: PROXY_DEFAULT_MODEL
-              value: "gpt-oss:20b"
+              value: "openclaw:main"
             - name: PROXY_TIMEOUT
               value: "120"
             - name: PROXY_READ_TIMEOUT

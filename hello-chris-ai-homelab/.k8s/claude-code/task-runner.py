@@ -18,7 +18,10 @@ import os
 import uuid
 from datetime import datetime, timezone
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -151,6 +154,40 @@ async def cancel_task(task_id: str):
     if proc and proc.returncode is None:
         proc.terminate()
     return {"id": task_id, "status": "cancelled"}
+
+
+DOWNLOADABLE_EXTS = {".pdf", ".md", ".txt", ".json", ".csv", ".html", ".yaml", ".yml", ".py", ".sh", ".png", ".jpg", ".svg"}
+
+@app.get("/files")
+async def list_files():
+    """List files in the workspace that were created or modified, filtered to useful extensions."""
+    ws = Path(WORKSPACE)
+    files = []
+    for p in sorted(ws.rglob("*")):
+        if p.is_file() and p.suffix.lower() in DOWNLOADABLE_EXTS and ".git" not in p.parts:
+            try:
+                stat = p.stat()
+                files.append({
+                    "path": str(p.relative_to(ws)),
+                    "size_bytes": stat.st_size,
+                    "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                })
+            except Exception:
+                continue
+    return {"workspace": WORKSPACE, "count": len(files), "files": files}
+
+
+@app.get("/files/{file_path:path}")
+async def download_file(file_path: str):
+    """Download a file from the workspace."""
+    ws = Path(WORKSPACE)
+    full = (ws / file_path).resolve()
+    # Security: ensure path is under workspace
+    if not str(full).startswith(str(ws.resolve())):
+        raise HTTPException(status_code=403, detail="path traversal blocked")
+    if not full.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(full, filename=full.name)
 
 
 @app.get("/health")
