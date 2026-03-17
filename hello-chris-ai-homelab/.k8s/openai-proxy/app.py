@@ -920,18 +920,24 @@ async def responses(req: Request):
             timeout = httpx.Timeout(connect=TIMEOUT, read=READ_TIMEOUT, write=TIMEOUT, pool=TIMEOUT)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 if _is_llamastack():
-                    # Fetch tools from upstream (graceful if not supported)
-                    tools = []
-                    try:
-                        tools_res = await get_json(client, "/v1/tools")
-                        for t in tools_res.get("data", []):
-                            tools.append({"type":"function","function":{"name": t.get("name"), "parameters": t.get("input_schema") or {"type":"object"}}})
-                    except Exception:
-                        pass  # Upstream (e.g. OpenClaw) may not support /v1/tools
-                    # Add Claude Code tools (proxy-side)
-                    tools.append({"type":"function","function":{"name":"claude_code_submit","description":"Submit a coding task to the Claude Code agent running in the cluster. Use when the user asks Claude Code to do something.","parameters":{"type":"object","properties":{"prompt":{"type":"string","description":"The task description for Claude Code"}},"required":["prompt"]}}})
-                    tools.append({"type":"function","function":{"name":"claude_code_status","description":"Check the status of Claude Code tasks. Call with no arguments to list all tasks, or with a task_id to get details on a specific task.","parameters":{"type":"object","properties":{"task_id":{"type":"string","description":"Optional task ID to check. Omit to list all tasks."}}}}})
-                    tools.append({"type":"function","function":{"name":"claude_code_submit_to_minio","description":"Submit a coding task to Claude Code and automatically upload the result to MinIO object storage when complete. Use when the user wants Claude Code output stored in MinIO.","parameters":{"type":"object","properties":{"prompt":{"type":"string","description":"The task description for Claude Code"},"bucket":{"type":"string","description":"MinIO bucket name (default: claude-results)"},"object_prefix":{"type":"string","description":"Path prefix in the bucket (default: claude-tasks)"}},"required":["prompt"]}}})
+                    # Explicit tool definitions — proxy executes all of these locally.
+                    # No dynamic fetch from upstream; we control exactly what's advertised.
+                    tools = [
+                        # --- Kubernetes tools ---
+                        {"type":"function","function":{"name":"pods_list_in_namespace","description":"List pods in a specific Kubernetes namespace.","parameters":{"type":"object","properties":{"namespace":{"type":"string","description":"The namespace to list pods in"},"label_selector":{"type":"string","description":"Optional label selector to filter pods"}},"required":["namespace"]}}},
+                        {"type":"function","function":{"name":"pods_get","description":"Get details of a specific pod by name.","parameters":{"type":"object","properties":{"name":{"type":"string","description":"Pod name"},"namespace":{"type":"string","description":"Namespace (optional, searches all if omitted)"}},"required":["name"]}}},
+                        {"type":"function","function":{"name":"pods_log","description":"Get logs from a pod.","parameters":{"type":"object","properties":{"name":{"type":"string","description":"Pod name"},"namespace":{"type":"string","description":"Namespace (optional)"},"container":{"type":"string","description":"Container name (optional)"},"tail":{"type":"integer","description":"Number of lines (default 100)"}},"required":["name"]}}},
+                        {"type":"function","function":{"name":"pods_top","description":"Get CPU and memory usage metrics for pods.","parameters":{"type":"object","properties":{"namespace":{"type":"string","description":"Namespace (optional, all if omitted)"},"name":{"type":"string","description":"Specific pod name (optional)"},"all_namespaces":{"type":"boolean","description":"Query all namespaces"},"label_selector":{"type":"string","description":"Label selector to filter"}}}}},
+                        # --- Weather tools ---
+                        {"type":"function","function":{"name":"get_current_weather","description":"Get current weather for a city or coordinates.","parameters":{"type":"object","properties":{"city":{"type":"string","description":"City name (e.g. 'Jacksonville')"},"latitude":{"type":"number","description":"Latitude (optional if city given)"},"longitude":{"type":"number","description":"Longitude (optional if city given)"},"units":{"type":"string","description":"Units: metric or imperial"}}}}},
+                        {"type":"function","function":{"name":"get_weather_forecast","description":"Get multi-day weather forecast for a city or coordinates.","parameters":{"type":"object","properties":{"city":{"type":"string","description":"City name"},"latitude":{"type":"number","description":"Latitude (optional if city given)"},"longitude":{"type":"number","description":"Longitude (optional if city given)"},"days":{"type":"integer","description":"Number of forecast days (default 3)"},"units":{"type":"string","description":"Units: metric or imperial"}}}}},
+                        # --- Web search ---
+                        {"type":"function","function":{"name":"web_search","description":"Search the web using Tavily. Use for current events, news, or factual queries.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query"},"max_results":{"type":"integer","description":"Max results (default 5)"}},"required":["query"]}}},
+                        # --- Claude Code tools ---
+                        {"type":"function","function":{"name":"claude_code_submit","description":"Submit a coding task to the Claude Code agent running in the cluster.","parameters":{"type":"object","properties":{"prompt":{"type":"string","description":"The task description for Claude Code"}},"required":["prompt"]}}},
+                        {"type":"function","function":{"name":"claude_code_status","description":"Check the status of Claude Code tasks. Call with no arguments to list all tasks, or with a task_id for details.","parameters":{"type":"object","properties":{"task_id":{"type":"string","description":"Optional task ID to check. Omit to list all tasks."}}}}},
+                        {"type":"function","function":{"name":"claude_code_submit_to_minio","description":"Submit a coding task to Claude Code and upload results to MinIO when complete.","parameters":{"type":"object","properties":{"prompt":{"type":"string","description":"The task description for Claude Code"},"bucket":{"type":"string","description":"MinIO bucket name (default: claude-results)"},"object_prefix":{"type":"string","description":"Path prefix in the bucket (default: claude-tasks)"}},"required":["prompt"]}}},
+                    ]
                     # No system prompt override — let upstream (ShadowBot/OpenClaw) handle identity via SOUL.md
                     msg_with_hint = messages
                     # Decide tool_choice based ONLY on the latest user message (avoid triggering on assistant/system text)
